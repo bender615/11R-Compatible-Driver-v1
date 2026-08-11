@@ -12,7 +12,7 @@ BINARIES := $(addprefix $(BUILD_DIR)/,$(ALL_TOOLS))
 
 .PHONY: all clean assembly
 
-all: $(BINARIES) assembly
+all: $(BINARIES)
 
 $(BUILD_DIR):
 	mkdir -p $@

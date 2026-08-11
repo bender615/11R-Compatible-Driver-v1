@@ -4,7 +4,7 @@ These standalone programs record the clean-room USB, audio, MIDI, and rig-data
 observations used by the DriverKit implementation. They are intentionally kept
 outside the signed driver targets.
 
-Build all 13 executables and the arm64 probe object on macOS:
+Build all 13 public diagnostic executables on macOS:
 
 ```sh
 make -C Tools
@@ -24,6 +24,11 @@ The results are written to `Tools/build/`, which is ignored by Git.
 - `errig_read`: read and decode the edit-buffer rig name or Rig Vol value.
 - `gtr_live_probe`, `gtr_probe_bytes.s`: local interoperability research aids;
   they do not distribute or link vendor binaries into the project.
+
+The optional `make -C Tools assembly` target assembles `gtr_probe_bytes.s` only
+when its private, locally extracted `/tmp/gtr_*.bin` inputs are present. Those
+vendor-derived byte extracts are intentionally excluded from the repository and
+from the default/CI build.
 
 ## Safety and privacy
 
