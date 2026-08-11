@@ -1,134 +1,166 @@
-# Eleven Rack Driver — user-space audio driver for Apple Silicon
+# Eleven Rack Driver for Apple Silicon
 
-<p align="center">
-  <img src="assets/Application_Icon.png" width="140" alt="Eleven Rack app icon">
-</p>
+Native macOS AudioDriverKit/USBDriverKit driver project for the Avid Eleven Rack
+(USB vendor `0x0DBA`, product `0xB011`). This DriverKit implementation is
+developed by Paul Bender. Parts began from or were informed by Matt Housley's
+MIT-licensed Eleven Rack application and user-space driver, which is credited
+as an upstream starting point rather than as the author of the new DriverKit,
+MIDI rig-reading, and protocol-decoding work.
 
-A macOS Core Audio driver for the Avid **Eleven Rack** that runs **entirely in
-user space**. There is **no kernel extension, no DriverKit system extension, and
-no "Reduced Security" / Recovery change** — just a signed audio plug-in, a small
-background engine, and a menu-bar app.
+> [!IMPORTANT]
+> This is experimental, independently developed compatibility software. The
+> DriverKit extension compiles but still requires Apple-granted entitlements,
+> signing, installation, and full live validation before normal use.
 
-Your Eleven Rack appears in Audio MIDI Setup and any DAW as an **8-in / 6-out**
-device at **44.1, 48, 88.2 or 96 kHz**.
+The Core Audio device is declared as:
 
-| Inputs (8) | Outputs (6) |
-|---|---|
-| Guitar In, Mic In, Eleven Rig L/R, Line In L/R, Digital In L/R | Main Out L/R, Re-Amp L/R, Digital Out L/R |
+- 8 inputs: Guitar, Mic, Eleven Rig L/R, Digital L/R, Line L/R
+- 6 outputs: Main L/R, Re-Amp L/R, Digital L/R
+- 44.1, 48, 88.2, and 96 kHz, with 32-bit floating-point Core Audio buffers
 
-> Apple Silicon only (arm64). macOS 13 or later.
+Core Audio channel map (the numeric order is part of the compatibility contract):
 
-## Install
+| Channel | Input name | Channel | Output name |
+| ---: | --- | ---: | --- |
+| 1 | Guitar Input | 1 | Main Output L |
+| 2 | Mic Input | 2 | Main Output R |
+| 3 | Eleven Rig L | 3 | Re-Amp L |
+| 4 | Eleven Rig R | 4 | Re-Amp R |
+| 5 | Digital Input L | 5 | Digital Output L |
+| 6 | Digital Input R | 6 | Digital Output R |
+| 7 | Line Input L |  |  |
+| 8 | Line Input R |  |  |
 
-1. Download **`ElevenRackDriver-1.0.1.pkg`** from the
-   [latest release](../../releases/latest) ([all releases](../../releases)).
-2. Double-click it and follow the installer. It asks for your administrator
-   password once (to install the plug-in and restart the audio service) — it
-   changes **no** security settings.
-3. Plug in your Eleven Rack.
+The hardware MIDI transport is USB interface 2 (Audio class, MIDIStreaming
+subclass), using bulk OUT endpoint `0x02` and bulk IN endpoint `0x82`, both with
+512-byte packets. Current macOS does not publish CoreMIDI endpoints for it on the
+test machine even though the interface is nominally class compliant. OEM parity
+therefore requires a persistent CoreMIDI bridge exposing the Eleven Rack Rig and
+External ports; this is an implementation item rather than being delegated to
+Apple's USB-MIDI class driver.
 
-Because the installer is not signed with a paid Apple Developer certificate,
-macOS Gatekeeper asks you to approve it **once**:
+The standalone C programs in [`Tools/`](Tools/) are protocol diagnostics.
+`Tools/erengine.c` contains the verified legacy IOUSBLib isochronous packet
+handling that was used to validate the DriverKit transport.
 
-- **Right-click** the `.pkg` → **Open** → **Open** in the dialog, **or**
-- if you double-clicked and were blocked, open **System Settings → Privacy &
-  Security**, scroll down, and click **Open Anyway**.
+## Current status
 
-That's the only extra step — no Terminal required.
+The project contains a native macOS installer app, a physical-device-matched
+AudioDriverKit extension, correct Core Audio topology, USB identity matching,
+and the required entitlement declarations. Its USBDriverKit transport now:
 
-## Using it
+- opens capture interface 4 and playback interface 3;
+- selects streaming alternate setting 1 in both directions;
+- schedules eight asynchronous 16-microframe isochronous requests per direction;
+- decodes eight signed 32-bit input lanes into Core Audio float buffers;
+- encodes six Core Audio output lanes as signed 32-bit device words;
+- uses fractional packet sizing at 44.1 and 88.2 kHz and integral sizing at
+  48 and 96 kHz;
+- sends the Eleven Rack clock-source and sample-rate `SET_CUR` requests; and
+- publishes OEM-style names for every Core Audio input and output element;
+- advertises 44.1, 48, 88.2, and 96 kHz as runtime-switchable formats; and
+- aborts, closes, and reopens the streams across stop/start and rate changes.
 
-After installing, the Eleven Rack **pick** icon appears in the menu bar (it also
-starts automatically at every login, and inverts for light/dark menu bars):
+The extension and host app compile for arm64 and x86_64. Live hardware probing
+confirmed playback endpoint `0x03`, capture endpoint `0x83`, and a 416-byte
+maximum packet in both directions. The device accepted and read back 44.1, 48,
+88.2, and 96 kHz, and completed short full-duplex streams at every rate. Observed
+capture averages were 176.43, 192.02, 352.79, and 384.00 bytes per microframe,
+respectively. Signed-driver validation, DriverKit frame-list offsets, prolonged
+stability, and physical routing of every input/output channel remain to be tested.
 
-- **Solid pick** — active: the Eleven Rack is connected and streaming.
-- **Dimmed pick** — the Eleven Rack is not connected.
-- **Red pick** — the engine isn't running.
+The CoreMIDI registry was tested with the device connected and currently reports
+zero physical devices, sources, or destinations. Descriptor probing confirmed
+that MIDI support must use interface 2, endpoints `0x02`/`0x82`, and USB-MIDI 1.0
+four-byte event packets.
 
-Click the icon for the control panel:
+`ermidi_bridge.c` implements that missing transport as two persistent CoreMIDI
+source/destination pairs named **Eleven Rack Rig** and **Eleven Rack External**.
+It routes USB-MIDI cable numbers 0 and 1, translates channel/system messages and
+SysEx in both directions, and includes an end-to-end `--self-test`. The test sends
+a universal identity request through the CoreMIDI destination and validates the
+Digidesign hardware reply after it returns through the CoreMIDI source.
 
-- **Live level meters** for all 8 inputs and 6 outputs.
-- **Sample-rate picker** (44.1 / 48 / 88.2 / 96 kHz) — retunes the hardware to
-  match; there's a brief (~60 ms) gap while the streams restart.
-- **MIDI status** — the Eleven Rack's CoreMIDI endpoints.
-- **Open Audio MIDI Setup**, **Restart Engine**, **Launch at login**, and
-  **Uninstall…**.
+Editor interoperability has also been verified. `errig_read.c` sends the
+recovered read-only edit-buffer request, receives a complete 1,269-byte rig dump,
+decodes the editor's 7-bit payload packing, and reports the current hardware rig
+name. The captured test payload decoded to 1,104 bytes and its reported name
+matched the connected hardware; the personal rig name and capture are excluded
+from this repository. See
+[Docs/EditorProtocolNotes.md](Docs/EditorProtocolNotes.md) for the message format,
+recovered read objects, payload transform, and the clean-room boundary for using
+the installed editor as a reference.
 
-<p align="center">
-  <img src="assets/Pop-Up_Menu.jpg" width="360" alt="Eleven Rack control panel">
-</p>
+The latest complete build and connected-hardware test matrix is recorded in
+[Docs/Validation-2026-08-11.md](Docs/Validation-2026-08-11.md).
 
-Select **Eleven Rack** as the input/output device in your DAW.
+## Building
 
-## Uninstall
+Open `ElevenRackDriver.xcodeproj`, select the **ElevenRack (macOS)** scheme, and
+choose **My Mac**. Set a unique bundle identifier and your development team for
+the app and driver targets.
 
-Click the menu-bar icon → **Uninstall…**. It removes the driver, the login item,
-and the app after a single password prompt. (Your DAW projects are untouched.)
+For a signing-independent compilation check:
 
-## Notes
-
-- Channel names show in Audio MIDI Setup and in DAWs that read Core Audio channel
-  names (Logic, Reaper, Pro Tools). Some apps (GarageBand, Audacity) label inputs
-  by number regardless.
-- The first recording immediately after a sample-rate change may need a second or
-  two to settle while the hardware clock re-locks.
-- **MIDI** needs nothing from this driver: the Eleven Rack's USB-MIDI interface is
-  a standard class device that macOS exposes on its own as the **Eleven Rack Rig**
-  and **Eleven Rack External** ports (in and out), usable in any DAW.
-
----
-
-## Architecture
-
-```
-   login ─► launchd (LaunchAgent)
-              └─► Eleven Rack.app  (menu bar; supervises the engine, shows status)
-                     ├─ erengine   (user-space USB engine; owns the device)
-                     │      └─ shared-memory ring (float32) ◄──► coreaudiod
-                     └─ reads the ring for status + meters
-                                    │
-   DAW / Core Audio ── coreaudiod ──► ElevenRackAudioPlugin (HAL .driver bundle)
-                                    │
-   Eleven Rack hardware ◄── USB (high-speed isochronous) ── erengine
-```
-
-- **`ElevenRackAudioPlugin/`** — a Core Audio `AudioServerPlugin` loaded by
-  `coreaudiod`. Publishes the device/streams/channel names and exchanges float32
-  audio with the engine through a lock-free shared-memory ring.
-- **`ElevenRackBridge/`** — the user-space engine (`erengine.c`) that owns the USB
-  device, streams isochronous audio, and bridges it to the plug-in through the
-  ring (`ERAudioRing.h`). Also contains standalone diagnostic tools.
-- **`ElevenRackApp/`** — the Swift menu-bar app: supervises `erengine`, shows
-  status, and hosts the control panel. Reads the ring **read-only** for meters
-  (via `er_*_peek_levels`) so it never disturbs the audio path.
-- **`packaging/`** — the installer: LaunchAgent, `postinstall`, and
-  `build_pkg.sh` which assembles the `.pkg`.
-
-## Build from source / make a release
-
-Requires the Xcode command-line tools (for `clang`, `swiftc`, `pkgbuild`).
-
-Open **`Eleven Rack Driver.code-workspace`** in Visual Studio Code for a ready-to-go
-setup — it sets the C11/C++17 standards and `ElevenRackBridge` include path and
-recommends the Swift and C/C++ extensions. Then build the installer with:
-
-```bash
-packaging/build_pkg.sh
+```sh
+xcodebuild -project ElevenRackDriver.xcodeproj \
+  -scheme 'ElevenRack (macOS)' \
+  -configuration Debug \
+  -derivedDataPath .DerivedData/Unsigned \
+  CODE_SIGNING_ALLOWED=NO build
 ```
 
-This builds and ad-hoc-signs the HAL plug-in, the USB engine, and the menu-bar
-app, then produces `dist/ElevenRackDriver-<version>.pkg`.
+Build the standalone diagnostic tools separately with:
 
-To ship a notarized, warning-free installer, set `SIGN_ID` to a *Developer ID
-Application* identity and `PKG_SIGN_ID` to a *Developer ID Installer* identity
-before running the script, then notarize the output with `xcrun notarytool`.
-
-For a quick developer install of just the plug-in + engine (no app/packaging):
-
-```bash
-./install.sh
+```sh
+make -C Tools
 ```
 
-## License
+Distribution requires Apple approval for these DriverKit entitlements:
 
-[MIT](LICENSE) © 2026 Matt Housley.
+- `com.apple.developer.driverkit`
+- `com.apple.developer.driverkit.family.audio`
+- `com.apple.developer.driverkit.transport.usb` for VID `0x0DBA` / PID `0xB011`
+- `com.apple.developer.system-extension.install` on the host app
+
+For local development, follow Apple's “Debugging and testing system extensions”
+instructions. Do not disable SIP on a daily-use machine merely to run an unsigned
+driver.
+
+## Activation
+
+Build and place the app in `/Applications`, connect the Eleven Rack, launch the
+app, and click **Activate Driver**. Approve the extension in System Settings if
+macOS requests it. A correctly signed and running build appears as **Eleven Rack**
+in Audio MIDI Setup.
+
+## Hardware validation
+
+1. Connect Eleven Rack directly to the Mac, avoiding a hub for initial testing.
+2. Activate the signed driver and confirm `systemextensionsctl list` shows it.
+3. Open Audio MIDI Setup and select each supported sample rate.
+4. Record all eight inputs while applying signal to each physical source.
+5. Send distinct low-level test tones to all six outputs and verify the Main,
+   Re-Amp, and Digital pairs independently.
+6. Run at least ten minutes per rate while watching the unified log for messages
+   from `ElevenRackDevice`, missed USB frames, underruns, or aborted transfers.
+7. Repeat through sleep/wake, unplug/replug, and an aggregate-device clock change.
+
+## Attribution
+
+The primary work in this repository is Copyright © 2026 Paul Bender and is
+licensed under the MIT license in [`LICENSE.txt`](LICENSE.txt). Paul developed
+the DriverKit transport, switchable-rate implementation, CoreMIDI bridge,
+hardware rig-name and Rig Vol reading, protocol decoding, and validation work.
+
+Matt Housley authored and contributed the earlier Eleven Rack application and
+user-space driver code used in part as a beginning base. His exact MIT license
+is retained as a secondary upstream notice in
+[`LICENSES/Matt-Housley-MIT.txt`](LICENSES/Matt-Housley-MIT.txt), and he is
+credited in [`CONTRIBUTORS.md`](CONTRIBUTORS.md).
+
+The inherited project identified its Xcode structure and AudioDriverKit object
+lifecycle as derived from Apple's “Creating an audio device driver” sample. The
+Avid MIT notice associated with the sample-derived portions is preserved in
+[`LICENSES/Avid-Sample-Code-MIT.txt`](LICENSES/Avid-Sample-Code-MIT.txt). See
+[`NOTICE.md`](NOTICE.md) for the complete attribution and trademark disclaimer.

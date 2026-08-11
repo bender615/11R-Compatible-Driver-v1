@@ -1,37 +1,26 @@
 name: Build
 
-# Build check: compile the plug-in, engine and app and assemble the installer on
-# every pull request and every push to main. Does not publish anything — the
-# resulting .pkg is uploaded only as a downloadable build artifact so a reviewer
-# can test it. Releases are handled separately by release.yml (on version tags).
-
 on:
-  pull_request:
-    branches: [main]
   push:
-    branches: [main]
-  workflow_dispatch:
+  pull_request:
 
-# This workflow only needs to read the repo (checkout) and upload an artifact;
-# lock the default token down to read-only.
 permissions:
   contents: read
 
 jobs:
   build:
-    runs-on: macos-14   # Apple Silicon (arm64)
+    runs-on: macos-15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Build installer (.pkg)
-        run: |
-          bash packaging/build_pkg.sh
-          ls -lh dist
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: ElevenRackDriver-pkg
-          path: dist/*.pkg
-          if-no-files-found: error
+      - uses: actions/checkout@v4
+      - name: Build diagnostic tools
+        run: make -C Tools
+      - name: Build app and DriverKit extension without signing
+        run: >-
+          xcodebuild
+          -project ElevenRackDriver.xcodeproj
+          -scheme 'ElevenRack (macOS)'
+          -configuration Debug
+          -derivedDataPath "$RUNNER_TEMP/ElevenRackDerivedData"
+          CODE_SIGNING_ALLOWED=NO
+          ONLY_ACTIVE_ARCH=NO
+          build

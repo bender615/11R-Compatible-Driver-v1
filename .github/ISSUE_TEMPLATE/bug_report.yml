@@ -1,74 +1,47 @@
 name: Bug report
-description: Something isn't working with the Eleven Rack Driver
-labels: ["bug"]
+description: Report a reproducible driver, audio, MIDI, or diagnostic problem
+title: "[Bug]: "
+labels:
+  - bug
 body:
   - type: markdown
     attributes:
-      value: "Thanks for reporting! Please include as much detail as you can."
-
-  - type: input
-    id: macos
+      value: Do not attach private presets, signing material, or vendor files.
+  - type: textarea
+    id: summary
     attributes:
-      label: macOS version
-      placeholder: "e.g. 14.5"
+      label: Problem
+      description: What happened, and what did you expect instead?
     validations:
       required: true
-
   - type: input
-    id: mac
+    id: environment
     attributes:
-      label: Mac model
-      description: This driver is Apple Silicon only.
-      placeholder: "e.g. Mac mini (M2)"
+      label: Environment
+      description: Mac model, macOS version, Xcode version, and Eleven Rack firmware
     validations:
       required: true
-
-  - type: input
-    id: driver
-    attributes:
-      label: Driver version
-      description: From the installer file name or the menu-bar app.
-      placeholder: "e.g. 1.0.0"
-    validations:
-      required: true
-
   - type: dropdown
-    id: area
+    id: rate
     attributes:
-      label: Area
+      label: Sample rate
       options:
-        - Audio (recording / playback)
-        - MIDI
-        - Menu-bar app / control panel
-        - Install / uninstall
-        - Other
+        - Not applicable
+        - 44.1 kHz
+        - 48 kHz
+        - 88.2 kHz
+        - 96 kHz
     validations:
       required: true
-
   - type: textarea
-    id: what
-    attributes:
-      label: What happened?
-      description: What did you expect, and what happened instead?
-    validations:
-      required: true
-
-  - type: textarea
-    id: steps
+    id: reproduce
     attributes:
       label: Steps to reproduce
-
+    validations:
+      required: true
   - type: textarea
-    id: status
+    id: logs
     attributes:
-      label: Menu-bar icon and panel state
-      description: >
-        Is the icon active / dimmed (device not connected) / red? What do the
-        meters and MIDI status show?
-
-  - type: textarea
-    id: log
-    attributes:
-      label: Engine log (optional)
-      description: "Paste the contents of ~/Library/Logs/ElevenRack/engine.log"
-      render: text
+      label: Sanitized logs
+      description: Remove names, paths, certificates, identifiers, and private rig data.
+      render: shell

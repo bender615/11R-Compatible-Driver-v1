@@ -1,19 +1,56 @@
-# Build output
-build/
-dist/
-*.o
-*.dSYM/
-
-# Compiled engine and diagnostic tools (built by install.sh / packaging/build_pkg.sh)
-ElevenRackBridge/erengine
-ElevenRackBridge/erprobe
-ElevenRackBridge/erstream
-ElevenRackBridge/erduplex
-ElevenRackBridge/erlanes
-ElevenRackBridge/erformat
-ElevenRackBridge/ringstat
-ElevenRackBridge/speedcheck
-
 # macOS
 .DS_Store
-._*
+.AppleDouble
+
+# Xcode user and generated data
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+.DerivedData/
+DerivedData/
+build/
+Build/
+*.xcarchive
+*.dSYM/
+*.dSYM.zip
+*.app
+*.dext
+
+**/*.xcodeproj/project.xcworkspace/*
+!**/*.xcodeproj/project.xcworkspace/xcshareddata/
+!**/*.xcodeproj/project.xcworkspace/xcshareddata/**
+
+# Standalone diagnostic outputs
+Tools/build/
+*.o
+*.d
+*.wav
+*.aiff
+*.aif
+*.caf
+*.raw
+*.pcm
+*.syx
+*.mid
+*.midi
+*.mp3
+
+# Signing material and local configuration
+*.cer
+*.p12
+*.mobileprovision
+*.provisionprofile
+*.key
+*.pem
+.env
+.env.*
+*.local.xcconfig
+
+# Vendor packages, backups, and crash/log output
+Conflicting Software Backup/
+*.pkg
+*.dmg
+*.ips
+*.crash
+*.log
