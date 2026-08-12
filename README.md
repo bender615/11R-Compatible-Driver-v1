@@ -56,10 +56,16 @@ and the required entitlement declarations. Its USBDriverKit transport now:
 - encodes six Core Audio output lanes as signed 32-bit device words;
 - uses fractional packet sizing at 44.1 and 88.2 kHz and integral sizing at
   48 and 96 kHz;
-- sends the Eleven Rack clock-source and sample-rate `SET_CUR` requests; and
+- sends the Eleven Rack clock-source and sample-rate `SET_CUR` requests;
 - publishes OEM-style names for every Core Audio input and output element;
 - advertises 44.1, 48, 88.2, and 96 kHz as runtime-switchable formats; and
-- aborts, closes, and reopens the streams across stop/start and rate changes.
+- anchors Core Audio timestamps to USB controller frame time rather than a
+  synthetic software timer;
+- publishes the isochronous scheduling latency and safety offsets to Core Audio;
+- follows a supported externally clocked rate through a Core Audio device
+  configuration change; and
+- aborts, closes, and reopens streams across stop/start and rate changes, with a
+  watchdog retry after a stalled transfer or recovered external clock.
 
 The extension and host app compile for arm64 and x86_64. Live hardware probing
 confirmed playback endpoint `0x03`, capture endpoint `0x83`, and a 416-byte
@@ -68,6 +74,20 @@ maximum packet in both directions. The device accepted and read back 44.1, 48,
 capture averages were 176.43, 192.02, 352.79, and 384.00 bytes per microframe,
 respectively. Signed-driver validation, DriverKit frame-list offsets, prolonged
 stability, and physical routing of every input/output channel remain to be tested.
+
+The macOS host app provides explicit controls for all four sample rates and for
+the three observed hardware clock selections: Internal, AES/EBU, and S/PDIF.
+Sample-rate changes use the standard Core Audio nominal-rate property; clock
+selection and hardware readback use the DriverKit user client. The app disables
+its rate picker for external clocking, and the driver rejects clock changes
+while isochronous streaming is active. Hardware status reads USB clock entities
+`0x80` and `0x81` rather than merely echoing the last requested values. The app
+shows external-clock lock, hardware rate, streaming state, Core Audio buffer
+size, input/output latency and safety offsets, and an estimated (not physically
+measured) round-trip value. It polls for unplug/replug and wake recovery and can
+export a privacy-safe JSON diagnostic containing configuration only—never the
+unit serial number, rig data, MIDI messages, or audio content. Sample-driver
+sine-tone, artificial input-volume, and data-source controls are not published.
 
 The CoreMIDI registry was tested with the device connected and currently reports
 zero physical devices, sources, or destinations. Descriptor probing confirmed
@@ -82,14 +102,30 @@ a universal identity request through the CoreMIDI destination and validates the
 Digidesign hardware reply after it returns through the CoreMIDI source.
 
 Editor interoperability has also been verified. `errig_read.c` sends the
-recovered read-only edit-buffer request, receives a complete 1,269-byte rig dump,
-decodes the editor's 7-bit payload packing, and reports the current hardware rig
-name. The captured test payload decoded to 1,104 bytes and its reported name
+recovered read-only edit-buffer request, receives a variable-length rig dump,
+decodes the editor's 7-bit payload packing, and reports the complete structural
+rig snapshot: globals, signal-chain order, effect names and IDs, every raw
+effect parameter, the selected amp/cab/microphone, and known human-readable
+settings. The captured test payload decoded to 1,104 bytes and its reported name
 matched the connected hardware; the personal rig name and capture are excluded
-from this repository. See
+from this repository. See [Docs/RigDataModel.md](Docs/RigDataModel.md) for the
+decoded model and remaining display-curve work, and
 [Docs/EditorProtocolNotes.md](Docs/EditorProtocolNotes.md) for the message format,
 recovered read objects, payload transform, and the clean-room boundary for using
 the installed editor as a reference.
+
+`er_inventory.c` performs a resumable Factory/User hardware inventory with a
+hard 15-second minimum between program changes. It verifies each selected
+address, atomically saves all 208 edit buffers, and restores the original
+program. `er_inventory_export.c` produces the exhaustive long-form setting CSV,
+and `er_inventory_analyze.rb` generates component/model tables, parameter ranges,
+Factory/User comparisons, manifests, checksums, and a Markdown report. The raw
+factory/user captures are intentionally not committed to this repository.
+
+The compact editor control path is also confirmed independently of bulk rig
+writes. Green JRC enable was changed and read back using the 14-byte Set message
+`F0 13 0B 0F 00 11 04 01 40 00 00 00 10 F7`; individual editor changes do not
+require retransmitting a complete edit buffer.
 
 The latest complete build and connected-hardware test matrix is recorded in
 [Docs/Validation-2026-08-11.md](Docs/Validation-2026-08-11.md).
@@ -114,6 +150,14 @@ Build the standalone diagnostic tools separately with:
 
 ```sh
 make -C Tools
+```
+
+Run a paced, resumable inventory and export its results with:
+
+```sh
+./Tools/build/er_inventory /path/to/inventory
+./Tools/build/er_inventory_export /path/to/inventory
+ruby ./Tools/er_inventory_analyze.rb /path/to/inventory
 ```
 
 Distribution requires Apple approval for these DriverKit entitlements:

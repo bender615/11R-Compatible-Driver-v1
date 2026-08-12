@@ -6,7 +6,7 @@ USB_FRAMEWORKS := -framework IOKit -framework CoreFoundation
 MIDI_FRAMEWORKS := -framework CoreMIDI
 AUDIO_FRAMEWORKS := -framework AudioToolbox -framework CoreAudio
 
-USB_TOOLS := erduplex erformat erlanes ermidi_test errig_read erstream speedcheck
+USB_TOOLS := erduplex erformat er_inventory er_inventory_export erlanes ermidi_test errig_read erstream speedcheck
 ALL_TOOLS := $(USB_TOOLS) erengine ermidi_bridge erprobe ersweep gtr_live_probe ringstat
 BINARIES := $(addprefix $(BUILD_DIR)/,$(ALL_TOOLS))
 
@@ -19,6 +19,8 @@ $(BUILD_DIR):
 
 $(addprefix $(BUILD_DIR)/,$(USB_TOOLS)): $(BUILD_DIR)/%: %.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< -o $@ $(USB_FRAMEWORKS) -pthread
+
+$(BUILD_DIR)/er_inventory $(BUILD_DIR)/er_inventory_export: errig_read.c
 
 $(BUILD_DIR)/erengine: erengine.c ERAudioRing.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< -o $@ $(USB_FRAMEWORKS) $(MIDI_FRAMEWORKS) $(AUDIO_FRAMEWORKS) -pthread

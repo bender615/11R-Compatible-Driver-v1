@@ -2,8 +2,7 @@
 See the LICENSE.txt file for this sample’s licensing information.
 
 Abstract:
-The implementation of an AudioDriverKit device that generates a
-             sine wave.
+The AudioDriverKit and USBDriverKit transport for Eleven Rack audio.
 */
 
 // Local Includes
@@ -69,18 +68,15 @@ struct ERUSBRequest
 	IOMemoryMap* frameMap;
 	OSAction* action;
 	bool input;
+	uint64_t scheduledFrame;
 };
-
-#define kToneGenerationBufferFrameSize 512
-
-#define kNumInputDataSources 3
 
 struct ElevenRackDevice_IVars
 {
 	OSSharedPtr<IOUserAudioDriver>	m_driver;
 	OSSharedPtr<IODispatchQueue>	m_work_queue;
 
-	uint64_t	m_zts_host_ticks_per_buffer;
+	uint64_t	m_monitor_interval_ticks;
 
 	IOUserAudioStreamBasicDescription		m_stream_format;
 
@@ -90,14 +86,8 @@ struct ElevenRackDevice_IVars
 	OSSharedPtr<IOUserAudioStream>			m_input_stream;
 	OSSharedPtr<IOMemoryMap>				m_input_memory_map;
 
-	OSSharedPtr<IOUserAudioLevelControl>	m_input_volume_control;
-	OSSharedPtr<IOUserAudioSelectorControl> m_input_selector_control;
-	IOUserAudioSelectorValueDescription 	m_data_sources[kNumInputDataSources];
-
 	OSSharedPtr<IOTimerDispatchSource>		m_zts_timer_event_source;
 	OSSharedPtr<OSAction>					m_zts_timer_occurred_action;
-
-	uint64_t	m_tone_sample_index;
 
 	OSSharedPtr<IOUSBHostDevice>		m_usb_device;
 	OSSharedPtr<IOUSBHostInterface>	m_usb_input_interface;
@@ -110,8 +100,18 @@ struct ElevenRackDevice_IVars
 	uint64_t m_usb_next_output_frame;
 	uint64_t m_usb_input_sample_frame;
 	uint64_t m_usb_output_sample_frame;
+	uint64_t m_usb_anchor_frame;
+	uint64_t m_usb_anchor_host_time;
+	uint64_t m_host_ticks_per_usb_frame;
+	uint64_t m_last_input_completion_time;
+	uint64_t m_last_output_completion_time;
+	uint64_t m_next_recovery_time;
 	double m_usb_output_accumulator;
 	bool m_usb_running;
+	bool m_io_active;
+	uint8_t m_usb_clock_source;
+	uint8_t m_usb_clock_valid;
+	uint32_t m_pending_external_rate;
 };
 
 static void ERReleaseUSBRequest(ERUSBRequest& request)
@@ -131,12 +131,15 @@ void ElevenRackDevice::ConfigureUSBDevice(IOUSBHostDevice* device)
 kern_return_t ElevenRackDevice::SetUSBHardwareRate(uint32_t rate)
 {
 	if (!ivars->m_usb_device) return kIOReturnNotReady;
+	if (ivars->m_usb_clock_source != ElevenRackClockSource_Internal)
+		return kIOReturnNotPermitted;
 	kern_return_t result = kIOReturnSuccess;
 	IOBufferMemoryDescriptor* descriptor = nullptr;
 	IOMemoryMap* map = nullptr;
 	uint16_t transferred = 0;
 
-	// Select the Eleven Rack internal clock (entity 0x80 on interface 1).
+	// Select the Eleven Rack internal clock (entity 0x80 on interface 1)
+	// before writing clock-frequency entity 0x81.
 	result = ivars->m_usb_device->CreateIOBuffer(kIOMemoryDirectionOut, 4, &descriptor);
 	if (result != kIOReturnSuccess) goto Exit;
 	result = descriptor->CreateMapping(0, 0, 0, 0, 0, &map);
@@ -154,6 +157,113 @@ kern_return_t ElevenRackDevice::SetUSBHardwareRate(uint32_t rate)
 Exit:
 	OSSafeReleaseNULL(map);
 	OSSafeReleaseNULL(descriptor);
+	return result;
+}
+
+kern_return_t ElevenRackDevice::SetUSBClockSource(uint8_t source)
+{
+	if (!ivars->m_usb_device) return kIOReturnNotReady;
+	if (source < ElevenRackClockSource_Internal ||
+		source > ElevenRackClockSource_SPDIF) return kIOReturnBadArgument;
+	if (ivars->m_usb_running) return kIOReturnBusy;
+
+	IOBufferMemoryDescriptor* descriptor = nullptr;
+	IOMemoryMap* map = nullptr;
+	uint16_t transferred = 0;
+	auto result = ivars->m_usb_device->CreateIOBuffer(
+		kIOMemoryDirectionOut, 1, &descriptor);
+	if (result != kIOReturnSuccess) goto Exit;
+	result = descriptor->CreateMapping(0, 0, 0, 0, 0, &map);
+	if (result != kIOReturnSuccess) goto Exit;
+	*reinterpret_cast<uint8_t*>(map->GetAddress() + map->GetOffset()) = source;
+	result = ivars->m_usb_device->DeviceRequest(ivars->m_driver.get(),
+		0x21, 0x01, 0x0100, 0x8001, 1, descriptor, &transferred, 1000);
+	if (result == kIOReturnSuccess && transferred == 1)
+		ivars->m_usb_clock_source = source;
+	else if (result == kIOReturnSuccess)
+		result = kIOReturnUnderrun;
+
+Exit:
+	OSSafeReleaseNULL(map);
+	OSSafeReleaseNULL(descriptor);
+	return result;
+}
+
+kern_return_t ElevenRackDevice::ReadUSBClockStatus(uint32_t* source,
+	uint32_t* rate, uint32_t* clock_valid)
+{
+	if (!source || !rate || !clock_valid) return kIOReturnBadArgument;
+	if (!ivars->m_usb_device) return kIOReturnNotReady;
+	*clock_valid = ElevenRackClockValidity_Unknown;
+
+	IOBufferMemoryDescriptor* descriptor = nullptr;
+	IOMemoryMap* map = nullptr;
+	uint16_t transferred = 0;
+	auto result = ivars->m_usb_device->CreateIOBuffer(
+		kIOMemoryDirectionIn, 4, &descriptor);
+	if (result != kIOReturnSuccess) goto Exit;
+	result = descriptor->CreateMapping(0, 0, 0, 0, 0, &map);
+	if (result != kIOReturnSuccess) goto Exit;
+
+	result = ivars->m_usb_device->DeviceRequest(ivars->m_driver.get(),
+		0xA1, 0x01, 0x0100, 0x8001, 1, descriptor, &transferred, 1000);
+	if (result != kIOReturnSuccess) goto Exit;
+	if (transferred != 1) { result = kIOReturnUnderrun; goto Exit; }
+	*source = *reinterpret_cast<uint8_t*>(map->GetAddress() + map->GetOffset());
+
+	transferred = 0;
+	result = ivars->m_usb_device->DeviceRequest(ivars->m_driver.get(),
+		0xA1, 0x01, 0x0100, 0x8101, 4, descriptor, &transferred, 1000);
+	if (result != kIOReturnSuccess) goto Exit;
+	if (transferred != 4) { result = kIOReturnUnderrun; goto Exit; }
+	*rate = *reinterpret_cast<uint32_t*>(map->GetAddress() + map->GetOffset());
+	ivars->m_usb_clock_source = static_cast<uint8_t>(*source);
+
+	// UAC2 Clock Validity Control (CS=2) returns a single Boolean. Some
+	// firmware revisions stall this optional read, so preserve useful source
+	// and rate status and report Unknown rather than failing the whole query.
+	transferred = 0;
+	if (ivars->m_usb_device->DeviceRequest(ivars->m_driver.get(),
+		0xA1, 0x01, 0x0200, 0x8101, 1, descriptor, &transferred, 1000) == kIOReturnSuccess &&
+		transferred == 1)
+	{
+		*clock_valid = *reinterpret_cast<uint8_t*>(map->GetAddress() + map->GetOffset()) ?
+			ElevenRackClockValidity_Locked : ElevenRackClockValidity_Unlocked;
+	}
+	else if (*source == ElevenRackClockSource_Internal)
+	{
+		// The device's own oscillator is the authoritative clock in this mode.
+		*clock_valid = ElevenRackClockValidity_Locked;
+	}
+	ivars->m_usb_clock_valid = static_cast<uint8_t>(*clock_valid);
+
+Exit:
+	OSSafeReleaseNULL(map);
+	OSSafeReleaseNULL(descriptor);
+	return result;
+}
+
+kern_return_t ElevenRackDevice::SetClockSource(uint32_t source)
+{
+	auto result = SetUSBClockSource(static_cast<uint8_t>(source));
+	if (result == kIOReturnSuccess &&
+		source == ElevenRackClockSource_Internal)
+		result = SetUSBHardwareRate(static_cast<uint32_t>(GetSampleRate()));
+	if (result == kIOReturnSuccess)
+	{
+		uint32_t actual_source = 0, rate = 0, valid = ElevenRackClockValidity_Unknown;
+		if (ReadUSBClockStatus(&actual_source, &rate, &valid) == kIOReturnSuccess)
+			ivars->m_usb_clock_valid = static_cast<uint8_t>(valid);
+	}
+	return result;
+}
+
+kern_return_t ElevenRackDevice::GetAudioStatus(uint32_t* source,
+	uint32_t* hardware_rate, uint32_t* clock_valid, uint32_t* streaming)
+{
+	if (!streaming) return kIOReturnBadArgument;
+	auto result = ReadUSBClockStatus(source, hardware_rate, clock_valid);
+	*streaming = ivars->m_usb_running ? 1 : 0;
 	return result;
 }
 
@@ -232,7 +342,10 @@ kern_return_t ElevenRackDevice::StartUSBTransport()
 		}
 	}
 
-	result = SetUSBHardwareRate(static_cast<uint32_t>(GetSampleRate()));
+	if (ivars->m_usb_clock_source == ElevenRackClockSource_Internal)
+		result = SetUSBHardwareRate(static_cast<uint32_t>(GetSampleRate()));
+	else
+		result = SetUSBClockSource(ivars->m_usb_clock_source);
 	if (result != kIOReturnSuccess) goto Failure;
 	{
 		uint64_t frame = 0, timestamp = 0;
@@ -240,10 +353,21 @@ kern_return_t ElevenRackDevice::StartUSBTransport()
 		if (result != kIOReturnSuccess) goto Failure;
 		ivars->m_usb_next_input_frame = frame + 25;
 		ivars->m_usb_next_output_frame = frame + 25;
+		ivars->m_usb_anchor_frame = frame;
+		ivars->m_usb_anchor_host_time = timestamp;
 	}
 	ivars->m_usb_input_sample_frame = 0;
 	ivars->m_usb_output_sample_frame = 0;
 	ivars->m_usb_output_accumulator = 0.0;
+	{
+		struct mach_timebase_info timebase_info;
+		mach_timebase_info(&timebase_info);
+		ivars->m_host_ticks_per_usb_frame = static_cast<uint64_t>(
+			(1000000.0 * static_cast<double>(timebase_info.denom)) /
+			static_cast<double>(timebase_info.numer));
+	}
+	ivars->m_last_input_completion_time = mach_absolute_time();
+	ivars->m_last_output_completion_time = ivars->m_last_input_completion_time;
 	ivars->m_usb_running = true;
 
 	for (uint32_t index = 0; index < kUSBRequestCount; ++index)
@@ -295,6 +419,14 @@ void ElevenRackDevice::InputIsochComplete_Impl(OSAction* action, IOReturn status
 	auto usb = reinterpret_cast<const uint8_t*>(request->dataMap->GetAddress() + request->dataMap->GetOffset());
 	auto audio = reinterpret_cast<float*>(ivars->m_input_memory_map->GetAddress() + ivars->m_input_memory_map->GetOffset());
 	const uint64_t audioCapacityFrames = ivars->m_input_memory_map->GetLength() / (sizeof(float) * kInputChannels);
+	const uint64_t firstSampleFrame = ivars->m_usb_input_sample_frame;
+	if (request->scheduledFrame >= ivars->m_usb_anchor_frame)
+	{
+		const uint64_t hostTime = ivars->m_usb_anchor_host_time +
+			(request->scheduledFrame - ivars->m_usb_anchor_frame) *
+			ivars->m_host_ticks_per_usb_frame;
+		UpdateCurrentZeroTimestamp(firstSampleFrame, hostTime);
+	}
 
 	for (uint32_t packet = 0; packet < kUSBFramesPerRequest; ++packet)
 	{
@@ -318,8 +450,10 @@ void ElevenRackDevice::InputIsochComplete_Impl(OSAction* action, IOReturn status
 		frames[packet].timeStamp = 0;
 	}
 
+	ivars->m_last_input_completion_time = mach_absolute_time();
+	request->scheduledFrame = ivars->m_usb_next_input_frame;
 	status = ivars->m_usb_input_pipe->IsochIO(request->dataDescriptor, request->frameDescriptor,
-		ivars->m_usb_next_input_frame, action);
+		request->scheduledFrame, action);
 	if (status == kIOReturnSuccess) ivars->m_usb_next_input_frame += kUSBFramesPerRequest / 8;
 	else { DebugMsg("Unable to arm Eleven Rack capture: 0x%x", status); ivars->m_usb_running = false; }
 }
@@ -369,8 +503,10 @@ void ElevenRackDevice::OutputIsochComplete_Impl(OSAction* action, IOReturn statu
 		byteOffset += bytes;
 	}
 
+	ivars->m_last_output_completion_time = mach_absolute_time();
+	request->scheduledFrame = ivars->m_usb_next_output_frame;
 	status = ivars->m_usb_output_pipe->IsochIO(request->dataDescriptor, request->frameDescriptor,
-		ivars->m_usb_next_output_frame, action);
+		request->scheduledFrame, action);
 	if (status == kIOReturnSuccess) ivars->m_usb_next_output_frame += kUSBFramesPerRequest / 8;
 	else { DebugMsg("Unable to arm Eleven Rack playback: 0x%x", status); ivars->m_usb_running = false; }
 }
@@ -398,6 +534,8 @@ bool ElevenRackDevice::init(IOUserAudioDriver* in_driver,
 
 	ivars->m_driver = OSSharedPtr(in_driver, OSRetain);
 	ivars->m_work_queue = GetWorkQueue();
+	ivars->m_usb_clock_source = ElevenRackClockSource_Internal;
+	ivars->m_usb_clock_valid = ElevenRackClockValidity_Unknown;
 
 	IOTimerDispatchSource* zts_timer_event_source = nullptr;
 	OSAction* zts_timer_occurred_action = nullptr;
@@ -405,8 +543,6 @@ bool ElevenRackDevice::init(IOUserAudioDriver* in_driver,
 	OSSharedPtr<OSString> output_stream_name = OSSharedPtr(OSString::withCString("Eleven Rack Outputs (6 ch)"), OSNoRetain);
 
 	OSSharedPtr<OSString> input_stream_name = OSSharedPtr(OSString::withCString("Eleven Rack Inputs (8 ch)"), OSNoRetain);
-	OSSharedPtr<OSString> input_volume_control_name = OSSharedPtr(OSString::withCString("SimpleInputVolumeControl"), OSNoRetain);
-	OSSharedPtr<OSString> input_data_source_control = OSSharedPtr(OSString::withCString("Input Tone Frequency Control"), OSNoRetain);
 
 	// Custom property information.
 	/// - Tag: CreateCustomProperty
@@ -417,14 +553,6 @@ bool ElevenRackDevice::init(IOUserAudioDriver* in_driver,
 	OSSharedPtr<IOUserAudioCustomProperty> custom_property = nullptr;
 	OSSharedPtr<OSString> qualifier = nullptr;
 	OSSharedPtr<OSString> data = nullptr;
-
-	// Configure the device and add stream objects.
-	auto data_source_0 = OSSharedPtr(OSString::withCString("Sine Tone 440"), OSNoRetain);
-	auto data_source_1 = OSSharedPtr(OSString::withCString("Sine Tone 660"), OSNoRetain);
-	auto data_source_2 = OSSharedPtr(OSString::withCString("Loopback"), OSNoRetain);
-	ivars->m_data_sources[0] = { 440, data_source_0 };
-	ivars->m_data_sources[1] = { 660, data_source_1 };
-	ivars->m_data_sources[2] = { 0, data_source_2 };
 
 	// Set up stream formats and other stream-related properties.
 	/// - Tag: CreateStreamFormats
@@ -535,38 +663,8 @@ bool ElevenRackDevice::init(IOUserAudioDriver* in_driver,
 
 	error = AddStream(ivars->m_input_stream.get());
 	FailIfError(error, , Failure, "failed to add input stream");
-
-	/// - Tag: AddVolumeControlObject
-	// Create the volume control object for the input stream.
-	ivars->m_input_volume_control = IOUserAudioLevelControl::Create(in_driver,
-																	true,
-																	-6.0,
-																	{-96.0, 0.0},
-																	IOUserAudioObjectPropertyElementMain,
-																	IOUserAudioObjectPropertyScope::Input,
-																	IOUserAudioClassID::VolumeControl);
-	FailIfNULL(ivars->m_input_volume_control.get(), error = kIOReturnNoMemory, Failure, "Failed to create input volume control");
-	ivars->m_input_volume_control->SetName(input_volume_control_name.get());
-
-	// Add the volume control to the device object.
-	error = AddControl(ivars->m_input_volume_control.get());
-	FailIfError(error, , Failure, "failed to add input volume level control");
-
-	// Create the input data source selector control for controlling the sine tone frequency.
-	ivars->m_input_selector_control = IOUserAudioSelectorControl::Create(in_driver,
-																		 true,
-																		 IOUserAudioObjectPropertyElementMain,
-																		 IOUserAudioObjectPropertyScope::Input,
-																		 IOUserAudioClassID::DataSourceControl);
-	FailIfNULL(ivars->m_input_selector_control.get(), error = kIOReturnNoMemory, Failure, "Failed to create input data source control");
-	ivars->m_input_selector_control->AddControlValueDescriptions(ivars->m_data_sources, 3);
-	// Set the data source selector's current value to tone with a frequency of 440 Hz.
-	ivars->m_input_selector_control->SetCurrentSelectedValues(&ivars->m_data_sources[0].m_value, 1);
-	ivars->m_input_selector_control->SetName(input_data_source_control.get());
-
-	// Add the data-source selector control to the driver.
-	error = AddControl(ivars->m_input_selector_control.get());
-	FailIfError(error, , Failure, "failed to add input data source control");
+	error = UpdateLatencyProperties(kDefaultSampleRate);
+	FailIfError(error, , Failure, "failed to publish Eleven Rack latency");
 
 	// Configure device-related information.
 	SetPreferredOutputChannelLayout(output_channel_layout, kOutputChannels);
@@ -576,12 +674,13 @@ bool ElevenRackDevice::init(IOUserAudioDriver* in_driver,
 	SetTransportType(IOUserAudioTransportType::USB);
 
 	/// - Tag: InitZtsTimer
-	// Initialize the timer that stands in for a real interrupt.
+	// The timer monitors clock/transport state. USB completion timing drives
+	// Core Audio timestamps; this is not a synthetic audio clock.
 	error = IOTimerDispatchSource::Create(ivars->m_work_queue.get(), &zts_timer_event_source);
 	FailIfError(error, , Failure, "failed to create the ZTS timer event source");
 	ivars->m_zts_timer_event_source = OSSharedPtr(zts_timer_event_source, OSNoRetain);
 
-	// Create a timer action to generate timestamps.
+	// Create the watchdog action.
 	error = CreateActionZtsTimerOccurred(sizeof(void*), &zts_timer_occurred_action);
 	FailIfError(error, , Failure, "failed to create the timer event source action");
 	ivars->m_zts_timer_occurred_action = OSSharedPtr(zts_timer_occurred_action, OSNoRetain);
@@ -617,7 +716,6 @@ Failure:
 	ivars->m_output_memory_map.reset();
 	ivars->m_input_stream.reset();
 	ivars->m_input_memory_map.reset();
-	ivars->m_input_volume_control.reset();
 	ivars->m_zts_timer_event_source.reset();
 	ivars->m_zts_timer_occurred_action.reset();
 	return false;
@@ -639,8 +737,6 @@ void ElevenRackDevice::free()
 		ivars->m_output_memory_map.reset();
 		ivars->m_input_stream.reset();
 		ivars->m_input_memory_map.reset();
-		ivars->m_input_volume_control.reset();
-		ivars->m_input_selector_control.reset();
 		ivars->m_zts_timer_event_source.reset();
 		ivars->m_zts_timer_occurred_action.reset();
 		ivars->m_work_queue.reset();
@@ -685,14 +781,23 @@ kern_return_t ElevenRackDevice::StartIO(IOUserAudioStartStopFlags in_flags)
 		ivars->m_output_memory_map = std::move(output_memory_map);
 		ivars->m_input_memory_map = std::move(input_memory_map);
 
+		// Reassert clocking after wake/restart before arming isochronous pipes.
+		if (ivars->m_usb_clock_source == ElevenRackClockSource_Internal)
+			error = SetUSBHardwareRate(static_cast<uint32_t>(GetSampleRate()));
+		else
+			error = SetUSBClockSource(ivars->m_usb_clock_source);
+		FailIfError(error, , Failure, "Failed to configure Eleven Rack clock");
+
 		error = StartUSBTransport();
 		FailIfError(error, , Failure, "Failed to start Eleven Rack USB transport");
 
-		// Start the timers to send timestamps and generate sine tone on the stream I/O buffer.
+		ivars->m_io_active = true;
+		// USB completions send timestamps; this timer watches clock and transport state.
 		StartTimers();
 		return;
 
 	Failure:
+		ivars->m_io_active = false;
 		super::StopIO(in_flags);
 		ivars->m_output_memory_map.reset();
 		ivars->m_input_memory_map.reset();
@@ -710,7 +815,7 @@ kern_return_t ElevenRackDevice::StopIO(IOUserAudioStartStopFlags in_flags)
 	__block kern_return_t error;
 
 	ivars->m_work_queue->DispatchSync(^(){
-		// Stop the timers for timestamps and sine tone generator.
+		ivars->m_io_active = false;
 		StopUSBTransport();
 		StopTimers();
 
@@ -752,16 +857,15 @@ kern_return_t ElevenRackDevice::PerformDeviceConfigurationChange(uint64_t change
 					break;
 				}
 			}
-			ret = SetSampleRate(rate_to_set);
-			if (ret == kIOReturnSuccess)
-			{
-				// Update the stream formats with the new rate.
-				ret = ivars->m_input_stream->DeviceSampleRateChanged(rate_to_set);
-				if (ret == kIOReturnSuccess)
-				{
-					ret = ivars->m_output_stream->DeviceSampleRateChanged(rate_to_set);
-				}
-			}
+			ret = HandleChangeSampleRate(rate_to_set);
+		}
+			break;
+
+		case k_external_rate_config_change_action:
+		{
+			const double rate = static_cast<double>(ivars->m_pending_external_rate);
+			ivars->m_pending_external_rate = 0;
+			ret = ApplySampleRate(rate, false);
 		}
 			break;
 
@@ -778,49 +882,74 @@ kern_return_t ElevenRackDevice::PerformDeviceConfigurationChange(uint64_t change
 
 kern_return_t ElevenRackDevice::AbortDeviceConfigurationChange(uint64_t change_action, OSObject* in_change_info)
 {
+	if (change_action == k_external_rate_config_change_action)
+		ivars->m_pending_external_rate = 0;
 	// Handle aborted configuration changes as necessary.
 	return super::AbortDeviceConfigurationChange(change_action, in_change_info);
 }
 
 kern_return_t ElevenRackDevice::HandleChangeSampleRate(double in_sample_rate)
 {
+	if (ivars->m_usb_clock_source == ElevenRackClockSource_Internal)
+		return ApplySampleRate(in_sample_rate, true);
+
+	// In external mode, Core Audio may follow—but never command—the hardware.
+	uint32_t source = 0, hardwareRate = 0;
+	uint32_t valid = ElevenRackClockValidity_Unknown;
+	const auto status = ReadUSBClockStatus(&source, &hardwareRate, &valid);
+	if (status != kIOReturnSuccess) return status;
+	if (valid == ElevenRackClockValidity_Unlocked)
+		return kIOReturnNotReady;
+	if (hardwareRate != static_cast<uint32_t>(in_sample_rate))
+		return kIOReturnNotPermitted;
+	return ApplySampleRate(in_sample_rate, false);
+}
+
+kern_return_t ElevenRackDevice::ApplySampleRate(double in_sample_rate,
+	bool program_hardware)
+{
 	bool supported = false;
 	for (uint32_t i = 0; i < kSampleRateCount; ++i)
 		supported |= static_cast<uint32_t>(in_sample_rate) == static_cast<uint32_t>(kSupportedSampleRates[i]);
 	if (!supported) return kIOReturnUnsupported;
 
-	// The USB transport applies the matching UAC SET_CUR clock request while
-	// I/O is stopped. Core Audio never runs input and output at different rates.
-	auto result = SetUSBHardwareRate(static_cast<uint32_t>(in_sample_rate));
-	if (result != kIOReturnSuccess) return result;
-	result = SetSampleRate(in_sample_rate);
-	if (result == kIOReturnSuccess)
+	if (program_hardware)
 	{
-		result = ivars->m_input_stream->DeviceSampleRateChanged(in_sample_rate);
-		if (result == kIOReturnSuccess)
-		{
-			result = ivars->m_output_stream->DeviceSampleRateChanged(in_sample_rate);
-		}
-		if (result == kIOReturnSuccess)
-		{
-			ivars->m_stream_format = ivars->m_input_stream->GetCurrentStreamFormat();
-			UpdateTimers();
-		}
+		auto result = SetUSBHardwareRate(static_cast<uint32_t>(in_sample_rate));
+		if (result != kIOReturnSuccess) return result;
 	}
-	return result;
+	auto result = SetSampleRate(in_sample_rate);
+	if (result != kIOReturnSuccess) return result;
+	result = ivars->m_input_stream->DeviceSampleRateChanged(in_sample_rate);
+	if (result != kIOReturnSuccess) return result;
+	result = ivars->m_output_stream->DeviceSampleRateChanged(in_sample_rate);
+	if (result != kIOReturnSuccess) return result;
+	ivars->m_stream_format = ivars->m_input_stream->GetCurrentStreamFormat();
+	result = UpdateLatencyProperties(in_sample_rate);
+	if (result != kIOReturnSuccess) return result;
+	UpdateTimers();
+	return kIOReturnSuccess;
 }
 
-inline int16_t ElevenRackDevice::FloatToInt16(float in_sample)
+kern_return_t ElevenRackDevice::UpdateLatencyProperties(double sample_rate)
 {
-	if (in_sample > 1.0f)
-	{
-		in_sample = 1.0f;
-	}
-	else if (in_sample < -1.0f)
-	{
-		in_sample = -1.0f;
-	}
-	return static_cast<int16_t>(in_sample * 0x7fff);
+	// Isochronous requests start 25 USB frames ahead and cover two milliseconds.
+	// Publish that real scheduling depth in audio frames; stream latency remains
+	// zero so Core Audio does not count the same transport delay twice.
+	const uint32_t outputLatency = static_cast<uint32_t>(ceil(sample_rate * 0.025));
+	const uint32_t inputLatency = static_cast<uint32_t>(ceil(sample_rate * 0.027));
+	const uint32_t safetyOffset = static_cast<uint32_t>(ceil(sample_rate * 0.002));
+	auto result = SetOutputLatency(outputLatency);
+	if (result != kIOReturnSuccess) return result;
+	result = SetInputLatency(inputLatency);
+	if (result != kIOReturnSuccess) return result;
+	result = SetOutputSafetyOffset(safetyOffset);
+	if (result != kIOReturnSuccess) return result;
+	result = SetInputSafetyOffset(safetyOffset);
+	if (result != kIOReturnSuccess) return result;
+	result = ivars->m_output_stream->SetLatency(0);
+	if (result != kIOReturnSuccess) return result;
+	return ivars->m_input_stream->SetLatency(0);
 }
 
 kern_return_t ElevenRackDevice::StartTimers()
@@ -836,8 +965,9 @@ kern_return_t ElevenRackDevice::StartTimers()
 		UpdateCurrentZeroTimestamp(0, 0);
 		auto current_time = mach_absolute_time();
 
-		// Start the timer. The first timestamp occurs when the timer goes off.
-		ivars->m_zts_timer_event_source->WakeAtTime(kIOTimerClockMachAbsoluteTime, current_time + ivars->m_zts_host_ticks_per_buffer, 0);
+		// Start the clock/transport watchdog. USB input completions publish time.
+		ivars->m_zts_timer_event_source->WakeAtTime(kIOTimerClockMachAbsoluteTime,
+			current_time + ivars->m_monitor_interval_ticks, 0);
 		ivars->m_zts_timer_event_source->SetEnable(true);
 	}
 	else
@@ -861,97 +991,68 @@ void	ElevenRackDevice::UpdateTimers()
 	struct mach_timebase_info timebase_info;
 	mach_timebase_info(&timebase_info);
 
-	double sample_rate = ivars->m_stream_format.mSampleRate;
-	double host_ticks_per_buffer = static_cast<double>(GetZeroTimestampPeriod() * NSEC_PER_SEC) / sample_rate;
-	host_ticks_per_buffer = (host_ticks_per_buffer * static_cast<double>(timebase_info.denom)) / static_cast<double>(timebase_info.numer);
-	ivars->m_zts_host_ticks_per_buffer = static_cast<uint64_t>(host_ticks_per_buffer);
+	ivars->m_monitor_interval_ticks = static_cast<uint64_t>(
+		(static_cast<double>(NSEC_PER_SEC) * static_cast<double>(timebase_info.denom)) /
+		static_cast<double>(timebase_info.numer));
 }
 
 /// - Tag: ZtsTimerOccurred
 void	ElevenRackDevice::ZtsTimerOccurred_Impl(OSAction* action, uint64_t time)
 {
-	// Get the current time.
-	auto current_time = time;
-
-	// Increment the timestamps...
-	uint64_t current_sample_time = 0;
-	uint64_t current_host_time = 0;
-	GetCurrentZeroTimestamp(&current_sample_time, &current_host_time);
-
-	auto host_ticks_per_buffer = ivars->m_zts_host_ticks_per_buffer;
-
-	if(current_host_time != 0)
-	{
-		current_sample_time += GetZeroTimestampPeriod();
-		current_host_time += host_ticks_per_buffer;
-	}
-	else
-	{
-		// ...but not if it's the first one.
-		current_sample_time = 0;
-		current_host_time = current_time;
-	}
-
-	// Update the device with the current timestamp.
-	UpdateCurrentZeroTimestamp(current_sample_time, current_host_time);
-
-	// Set the timer to go off in one buffer.
+	MonitorAndRecoverTransport(time);
+	const uint64_t nextTime = mach_absolute_time() + ivars->m_monitor_interval_ticks;
 	ivars->m_zts_timer_event_source->WakeAtTime(kIOTimerClockMachAbsoluteTime,
-												current_host_time + host_ticks_per_buffer, 0);
+											nextTime, 0);
 }
 
-/// - Tag: GenerateToneForInput
-void ElevenRackDevice::GenerateToneForInput(double in_tone_freq, size_t in_sample_time, size_t in_frame_size)
+void ElevenRackDevice::MonitorAndRecoverTransport(uint64_t current_time)
 {
-	// Fill out the input buffer with a sine tone.
-	if (ivars->m_input_memory_map)
+	if (!ivars->m_io_active) return;
+
+	uint32_t source = ivars->m_usb_clock_source;
+	uint32_t rate = 0;
+	uint32_t valid = ElevenRackClockValidity_Unknown;
+	const auto clockResult = ReadUSBClockStatus(&source, &rate, &valid);
+	if (clockResult == kIOReturnSuccess)
 	{
-		// Get the pointer to the I/O buffer and use stream format information
-		// to get the buffer length.
-		const auto& format = ivars->m_stream_format;
-		auto buffer_length = ivars->m_input_memory_map->GetLength() / (format.mBytesPerFrame / format.mChannelsPerFrame);
-		auto num_samples = in_frame_size;
-		auto buffer = reinterpret_cast<int16_t*>(ivars->m_input_memory_map->GetAddress() + ivars->m_input_memory_map->GetOffset());
-
-		// Get the volume control dB value to apply gain to the tone.
-		auto input_volume_level = ivars->m_input_volume_control->GetScalarValue();
-
-		for(size_t i = 0; i < num_samples; i++)
+		ivars->m_usb_clock_valid = static_cast<uint8_t>(valid);
+		if (source != ElevenRackClockSource_Internal &&
+			valid == ElevenRackClockValidity_Unlocked)
 		{
-			float float_value = input_volume_level * sin(2.0 * M_PI * in_tone_freq * static_cast<double>(ivars->m_tone_sample_index) / format.mSampleRate);
-			int16_t integer_value = FloatToInt16(float_value);
-			for (auto channel_index = 0; channel_index < format.mChannelsPerFrame; channel_index++)
-			{
-				auto buffer_index = (format.mChannelsPerFrame * (in_sample_time + i) + channel_index) % buffer_length;
-				buffer[buffer_index] = integer_value;
-			}
-			ivars->m_tone_sample_index += 1;
+			// Do not feed stale/repeated samples to Core Audio after external
+			// synchronization is lost. The watchdog restarts after lock returns.
+			if (ivars->m_usb_running) StopUSBTransport();
+			return;
+		}
+
+		bool supported = false;
+		for (uint32_t i = 0; i < kSampleRateCount; ++i)
+			supported |= rate == static_cast<uint32_t>(kSupportedSampleRates[i]);
+		if (source != ElevenRackClockSource_Internal && supported &&
+			rate != static_cast<uint32_t>(GetSampleRate()) &&
+			ivars->m_pending_external_rate == 0)
+		{
+			ivars->m_pending_external_rate = rate;
+			const auto requestResult = RequestDeviceConfigurationChange(
+				k_external_rate_config_change_action, nullptr);
+			if (requestResult != kIOReturnSuccess)
+				ivars->m_pending_external_rate = 0;
 		}
 	}
-}
 
-kern_return_t ElevenRackDevice::ToggleDataSource()
-{
-	__block kern_return_t ret = kIOReturnSuccess;
-	GetWorkQueue()->DispatchSync(^(){
-		IOUserAudioSelectorValue current_data_source_value;
-		ivars->m_input_selector_control->GetCurrentSelectedValues(&current_data_source_value, 1);
+	const uint64_t stallThreshold = ivars->m_monitor_interval_ticks * 2;
+	const bool inputStalled = current_time > ivars->m_last_input_completion_time &&
+		current_time - ivars->m_last_input_completion_time > stallThreshold;
+	const bool outputStalled = current_time > ivars->m_last_output_completion_time &&
+		current_time - ivars->m_last_output_completion_time > stallThreshold;
+	if (ivars->m_usb_running && !inputStalled && !outputStalled) return;
+	if (ivars->m_usb_clock_source != ElevenRackClockSource_Internal &&
+		ivars->m_usb_clock_valid == ElevenRackClockValidity_Unlocked) return;
+	if (current_time < ivars->m_next_recovery_time) return;
 
-
-		IOUserAudioSelectorValue data_source_value_to_set = current_data_source_value;
-		if (current_data_source_value == ivars->m_data_sources[0].m_value)
-		{
-			data_source_value_to_set = ivars->m_data_sources[1].m_value;
-		}
-		else if (current_data_source_value == ivars->m_data_sources[1].m_value)
-		{
-			data_source_value_to_set = ivars->m_data_sources[2].m_value;
-		}
-		else
-		{
-			data_source_value_to_set = ivars->m_data_sources[0].m_value;
-		}
-		ret = ivars->m_input_selector_control->SetCurrentSelectedValues(&data_source_value_to_set, 1);
-	});
-	return ret;
+	ivars->m_next_recovery_time = current_time + ivars->m_monitor_interval_ticks * 2;
+	StopUSBTransport();
+	const auto result = StartUSBTransport();
+	if (result != kIOReturnSuccess)
+		DebugMsg("Eleven Rack transport recovery failed: 0x%x", result);
 }

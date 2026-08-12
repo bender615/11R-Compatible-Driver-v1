@@ -41,8 +41,10 @@ static const uint8_t *dump_symbol(void *handle, const char *name, size_t length,
 
 int main(void)
 {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     static const char *framework =
-        "/Applications/Pro Tools.app/Contents/Frameworks/Gtr.framework/Versions/A/Gtr";
+        "/Applications/Eleven Rack Editor.app/Contents/Frameworks/Gtr.framework/Versions/A/Gtr";
     void *handle = dlopen(framework, RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
         fprintf(stderr, "dlopen: %s\n", dlerror());
@@ -78,6 +80,12 @@ int main(void)
     dump_symbol(handle,
                 "_ZN15Gtr_Bridge_MIDI11GetRigInputEN13Gtr_TokenPath10EDirectionE",
                 64, "/tmp/gtr_get_rig_input.bin");
+    dump_symbol(handle,
+                "_ZN15Gtr_Bridge_MIDI14GetValueStringEN13Gtr_TokenPath10EDirectionE13EPlugInInstIDhia",
+                192, "/tmp/gtr_get_value_string.bin");
+    dump_symbol(handle,
+                "_ZN15Gtr_Bridge_MIDI17UpdateValueStringEN13Gtr_TokenPath10EDirectionE13EPlugInInstIDhiaRSs",
+                192, "/tmp/gtr_update_value_string.bin");
     dump_symbol(handle,
                 "_ZN15Gtr_Bridge_MIDI10PushBufferER14Cmn_PolyVectorIhLb0EEPhi",
                 276, "/tmp/gtr_push_buffer.bin");

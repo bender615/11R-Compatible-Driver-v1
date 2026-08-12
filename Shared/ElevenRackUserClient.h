@@ -11,7 +11,14 @@ The Objective-C/Swift bridging header, which manages communications
 @interface ElevenRackUserClient : NSObject
 
 - (NSString*) open;
-- (NSString*) toggleDataSource;
-- (NSString*) toggleRate;
+- (void) close;
+- (double) readCurrentSampleRate;
+- (uint32_t) readHardwareSampleRate;
+- (NSInteger) readClockSource;
+- (NSDictionary<NSString*, NSNumber*>*) readAudioStatus;
+- (NSDictionary<NSString*, NSNumber*>*) readCoreAudioStatus;
+- (NSString*) setSampleRate:(double)sampleRate;
+- (NSString*) followExternalSampleRate:(double)sampleRate;
+- (NSString*) setClockSource:(NSInteger)clockSource;
 
 @end

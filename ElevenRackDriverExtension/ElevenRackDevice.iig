@@ -2,8 +2,7 @@
 See the LICENSE.txt file for this sample’s licensing information.
 
 Abstract:
-Headers for an AudioDriverKit device that generates a
-            sine wave.
+Headers for the Eleven Rack AudioDriverKit/USBDriverKit device.
 */
 
 #ifndef ElevenRackDevice_h
@@ -19,6 +18,7 @@ Headers for an AudioDriverKit device that generates a
 using namespace AudioDriverKit;
 
 constexpr uint64_t k_custom_config_change_action = 1234;
+constexpr uint64_t k_external_rate_config_change_action = 1235;
 
 class IOUserAudioDriver;
 class IOUSBHostDevice;
@@ -50,10 +50,10 @@ public:
 
 	virtual kern_return_t		HandleChangeSampleRate(double in_sample_rate) final LOCALONLY;
 
-	static inline int16_t 		FloatToInt16(float in_sample) LOCALONLY;
-
-	kern_return_t				ToggleDataSource() LOCALONLY;
 	void						ConfigureUSBDevice(IOUSBHostDevice* device) LOCALONLY;
+	kern_return_t				SetClockSource(uint32_t source) LOCALONLY;
+	kern_return_t				GetAudioStatus(uint32_t* source, uint32_t* hardware_rate,
+									   uint32_t* clock_valid, uint32_t* streaming) LOCALONLY;
 
 private:
 	kern_return_t				StartTimers() LOCALONLY;
@@ -65,10 +65,15 @@ private:
 	virtual void				ZtsTimerOccurred(OSAction* action,
 												 uint64_t time) TYPE(IOTimerDispatchSource::TimerOccurred);
 
-	void						GenerateToneForInput(double in_tone_freq, size_t in_sample_time, size_t in_frame_size) LOCALONLY;
 	kern_return_t				StartUSBTransport() LOCALONLY;
 	void						StopUSBTransport() LOCALONLY;
 	kern_return_t				SetUSBHardwareRate(uint32_t rate) LOCALONLY;
+	kern_return_t				SetUSBClockSource(uint8_t source) LOCALONLY;
+	kern_return_t				ReadUSBClockStatus(uint32_t* source, uint32_t* rate,
+									   uint32_t* clock_valid) LOCALONLY;
+	kern_return_t				ApplySampleRate(double sample_rate, bool program_hardware) LOCALONLY;
+	kern_return_t				UpdateLatencyProperties(double sample_rate) LOCALONLY;
+	void						MonitorAndRecoverTransport(uint64_t current_time) LOCALONLY;
 	virtual void				InputIsochComplete(OSAction* action, IOReturn status)
 		TYPE(IOUSBHostPipe::CompleteAsyncIsochIO);
 	virtual void				OutputIsochComplete(OSAction* action, IOReturn status)

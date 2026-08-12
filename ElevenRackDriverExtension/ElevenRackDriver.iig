@@ -40,6 +40,11 @@ public:
 	kern_return_t HandleToggleDataSource() LOCALONLY;
 
 	kern_return_t HandleTestConfigChange() LOCALONLY;
+
+	kern_return_t HandleSetClockSource(uint32_t source) LOCALONLY;
+
+	kern_return_t HandleGetAudioStatus(uint32_t* source, uint32_t* hardware_rate,
+									uint32_t* clock_valid, uint32_t* streaming) LOCALONLY;
 };
 
 #endif /* ElevenRackDriver_h */

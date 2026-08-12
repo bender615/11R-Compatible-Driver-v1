@@ -40,3 +40,8 @@ read the source header before running one on connected equipment.
 Rig dumps and SysEx captures can contain personal names and settings. They are
 ignored by Git and should not be attached to issues unless deliberately
 sanitized.
+
+On current macOS releases, `errig_read` can fall back to opening USB-MIDI
+interface 2 directly when the deprecated whole-device IOUSBLib user client is
+unavailable. The fallback is read-only unless a diagnostic explicitly documents
+a write operation.

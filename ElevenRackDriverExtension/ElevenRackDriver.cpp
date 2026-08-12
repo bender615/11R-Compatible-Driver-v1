@@ -68,6 +68,7 @@ kern_return_t ElevenRackDriver::Start_Impl(IOService* in_provider)
 	auto manufacturer_uid = OSSharedPtr(OSString::withCString("Avid"), OSNoRetain);
 	auto device_name = OSSharedPtr(OSString::withCString("Eleven Rack"), OSNoRetain);
 	IOUSBHostDevice* usb_device = nullptr;
+	bool usb_device_open = false;
 
 	kern_return_t error = Start(in_provider, SUPERDISPATCH);
 	FailIfError(error, , Failure, "Failed to start Super");
@@ -77,6 +78,7 @@ kern_return_t ElevenRackDriver::Start_Impl(IOService* in_provider)
 	ivars->m_usb_device = OSSharedPtr(usb_device, OSRetain);
 	error = usb_device->Open(this, 0, 0);
 	FailIfError(error, , Failure, "Failed to open Eleven Rack USB device");
+	usb_device_open = true;
 
 	// Get the service's default dispatch queue from the driver object.
 	ivars->m_work_queue = GetWorkQueue();
@@ -102,6 +104,10 @@ kern_return_t ElevenRackDriver::Start_Impl(IOService* in_provider)
 	return kIOReturnSuccess;
 
 Failure:
+	if (usb_device_open && usb_device) usb_device->Close(this, 0);
+	ivars->m_simple_audio_device.reset();
+	ivars->m_work_queue.reset();
+	ivars->m_usb_device.reset();
 	return error;
 }
 
@@ -164,8 +170,7 @@ kern_return_t ElevenRackDriver::StartDevice(IOUserAudioObjectID in_object_id, IO
 
 	__block kern_return_t ret;
 	ivars->m_work_queue->DispatchSync(^(){
-		// Tell the superclass to start the device and the update the timer
-		// to generate timestamps.
+		// Tell the superclass to start the device transport and watchdog.
 		ret = super::StartDevice(in_object_id, in_flags);
 	});
 	if (ret == kIOReturnSuccess)
@@ -183,7 +188,7 @@ kern_return_t ElevenRackDriver::StopDevice(IOUserAudioObjectID in_object_id, IOU
 		return kIOReturnBadArgument;
 	}
 
-	// Tell the superclass to stop device and stop timestamps.
+	// Tell the superclass to stop the device transport and watchdog.
 	__block kern_return_t ret;
 	ivars->m_work_queue->DispatchSync(^(){
 		ret = super::StopDevice(in_object_id, in_flags);
@@ -198,11 +203,9 @@ kern_return_t ElevenRackDriver::StopDevice(IOUserAudioObjectID in_object_id, IOU
 
 kern_return_t ElevenRackDriver::HandleToggleDataSource()
 {
-	__block kern_return_t ret = kIOReturnSuccess;
-	ivars->m_work_queue->DispatchSync(^(){
-		ret = ivars->m_simple_audio_device->ToggleDataSource();
-	});
-	return ret;
+	// Retain the legacy selector ordinal for user-client ABI compatibility,
+	// but do not publish the sample driver's artificial tone selector.
+	return kIOReturnUnsupported;
 }
 
 /// - Tag: HandleTestConfigChange
@@ -210,4 +213,25 @@ kern_return_t ElevenRackDriver::HandleTestConfigChange()
 {
 	auto change_info = OSSharedPtr(OSString::withCString("Toggle Sample Rate"), OSNoRetain);
 	return ivars->m_simple_audio_device->RequestDeviceConfigurationChange(k_custom_config_change_action, change_info.get());
+}
+
+kern_return_t ElevenRackDriver::HandleSetClockSource(uint32_t source)
+{
+	__block kern_return_t ret = kIOReturnSuccess;
+	ivars->m_work_queue->DispatchSync(^(){
+		ret = ivars->m_simple_audio_device->SetClockSource(source);
+	});
+	return ret;
+}
+
+kern_return_t ElevenRackDriver::HandleGetAudioStatus(uint32_t* source,
+	uint32_t* hardware_rate, uint32_t* clock_valid, uint32_t* streaming)
+{
+	if (!source || !hardware_rate || !clock_valid || !streaming) return kIOReturnBadArgument;
+	__block kern_return_t ret = kIOReturnSuccess;
+	ivars->m_work_queue->DispatchSync(^(){
+		ret = ivars->m_simple_audio_device->GetAudioStatus(source, hardware_rate,
+			clock_valid, streaming);
+	});
+	return ret;
 }

@@ -27,6 +27,19 @@ driver” sample and included an Avid MIT notice. That notice is preserved
 verbatim in
 [`LICENSES/Avid-Sample-Code-MIT.txt`](LICENSES/Avid-Sample-Code-MIT.txt).
 
+## ElevenHack protocol reference
+
+The bulk-rig section layout and the initial effect and amplifier identifier
+catalog used by `Tools/errig_read.c` are adapted from ElevenHack, Copyright
+2013-2020 Guillaume Schmid. ElevenHack was created after extensive experiments
+with the Eleven Rack and provides a TFX parser and rig upload/retrieval
+protocol implementation. ElevenHack is licensed under Apache License 2.0; its
+license and copyright notice are preserved in
+[`LICENSES/ElevenHack-Apache-2.0.txt`](LICENSES/ElevenHack-Apache-2.0.txt).
+
+The C decoder in this repository is modified and extended with independently
+observed hardware data and installed-editor interoperability information.
+
 No Avid application binaries, installer packages, presets, artwork, or other
 proprietary assets are included in this repository.
 

@@ -23,6 +23,22 @@ enum ElevenRackDriverExternalMethod
 	ElevenRackDriverExternalMethod_Close, // No arguments.
 	ElevenRackDriverExternalMethod_ToggleDataSource, // No arguments. This switches between data source selection.
 	ElevenRackDriverExternalMethod_TestConfigChange, // No arguments. This switches between sample rates and excercise config change mechanism.
+	ElevenRackDriverExternalMethod_SetClockSource, // One scalar input: ElevenRackClockSource.
+	ElevenRackDriverExternalMethod_GetAudioStatus, // Four outputs: clock source, hardware rate, clock validity, streaming.
+};
+
+enum ElevenRackClockValidity
+{
+	ElevenRackClockValidity_Unlocked = 0,
+	ElevenRackClockValidity_Locked = 1,
+	ElevenRackClockValidity_Unknown = 2,
+};
+
+enum ElevenRackClockSource
+{
+	ElevenRackClockSource_Internal = 1,
+	ElevenRackClockSource_AES_EBU = 2,
+	ElevenRackClockSource_SPDIF = 3,
 };
 
 #endif /* ElevenRackDriverKeys_h */
