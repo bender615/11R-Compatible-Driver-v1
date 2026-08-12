@@ -21,10 +21,14 @@ notice are preserved verbatim in
 [`LICENSES/Matt-Housley-MIT.txt`](LICENSES/Matt-Housley-MIT.txt). That notice
 continues to apply to portions copied or derived from his work.
 
-The inherited project also identified portions of its Xcode structure and
-AudioDriverKit lifecycle as derived from Apple's “Creating an audio device
-driver” sample and included an Avid MIT notice. That notice is preserved
-verbatim in
+The DriverKit implementation added to this fork uses portions of Apple's
+publicly distributed “Creating an audio device driver” (SimpleAudio) sample as
+its starting scaffold. Those sample-derived portions include Xcode project
+structure, AudioDriverKit driver/device lifecycle code, user-client
+communication, and system-extension activation UI. They did not originate in
+Matt Housley's upstream repository and were not taken from an Eleven Rack
+driver, editor, or installer. Apple's sample includes a Copyright © 2024 Avid
+MIT notice, which is preserved verbatim in
 [`LICENSES/Avid-Sample-Code-MIT.txt`](LICENSES/Avid-Sample-Code-MIT.txt).
 
 ## ElevenHack protocol reference
